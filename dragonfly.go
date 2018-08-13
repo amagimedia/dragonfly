@@ -23,6 +23,16 @@ import (
 	"github.com/golang/glog"
 )
 
+// Config gives list of all rds details
+var Config RdsConfig
+var cloudWatchChannel chan cloudwatch.PutMetricDataInput
+
+const (
+	maxMetricDataSize        = 15
+	connectionPerTenantQuery = "SELECT DB,COUNT(*) as count FROM INFORMATION_SCHEMA.PROCESSLIST WHERE DB IS NOT NULL GROUP BY DB ORDER BY count DESC;"
+	dbSizePerTenantQuery     = "SELECT table_schema 'DB Name', ROUND(SUM(data_length + index_length) / 1024 / 1024, 1) 'DB Size in MB' FROM information_schema.tables GROUP BY table_schema;"
+)
+
 type RdsConfig []struct {
 	User                 string        `json:"user"`
 	Endpoint             string        `json:"endpoint"`
@@ -42,11 +52,6 @@ type metricData struct {
 	DimensionValue string
 }
 
-// Config gives list of all rds details
-var Config RdsConfig
-var cloudWatchChannel chan cloudwatch.PutMetricDataInput
-var maxMetricDataSize int
-
 func readConfig() {
 	inputConfig := flag.String("input", "rds_config.json", "list of clouds file")
 	flag.Parse()
@@ -65,7 +70,7 @@ func readConfig() {
 	rawJSON := json.RawMessage(rawData)
 	jErr := json.Unmarshal(rawJSON, &Config)
 	if jErr != nil {
-		fmt.Println("error occured while parsing json %s", *inputConfig)
+		fmt.Println("error occured while parsing json ", *inputConfig)
 		os.Exit(1)
 	}
 }
@@ -73,7 +78,7 @@ func readConfig() {
 // collect all query rows then create metricsInput so that if all query is less than 15 we call cloudwatch api only  once
 
 func getConnectionPerTenant(db *sql.DB, MetricsDataList *[]metricData, DBInstanceIdentifier string) {
-	results, err := db.Query("SELECT DB,COUNT(*) as count FROM INFORMATION_SCHEMA.PROCESSLIST WHERE DB IS NOT NULL GROUP BY DB ORDER BY count DESC;")
+	results, err := db.Query(connectionPerTenantQuery)
 	if err != nil {
 		glog.Error("Failed to get per tenant db connections for ", DBInstanceIdentifier, ". Error : ", err)
 	}
@@ -85,7 +90,7 @@ func getConnectionPerTenant(db *sql.DB, MetricsDataList *[]metricData, DBInstanc
 		dbConnection.DimensionName = "ConnectionPerTenant"
 		err = results.Scan(&dbConnection.MetricName, &dbConnection.MetricValue)
 		if err != nil {
-			glog.Error("failed to scan process list for ", DBInstanceIdentifier)
+			glog.Error("failed to scan process list for ", DBInstanceIdentifier, ".Error: ", err)
 		}
 		*MetricsDataList = append(*MetricsDataList, dbConnection)
 	}
@@ -93,9 +98,9 @@ func getConnectionPerTenant(db *sql.DB, MetricsDataList *[]metricData, DBInstanc
 
 func getDbSizePerTenant(db *sql.DB, MetricsDataList *[]metricData, DBInstanceIdentifier string) {
 	// Get size of each database in MB
-	sizeResults, sizeErr := db.Query("SELECT table_schema 'DB Name', ROUND(SUM(data_length + index_length) / 1024 / 1024, 1) 'DB Size in MB' FROM information_schema.tables GROUP BY table_schema;")
+	sizeResults, sizeErr := db.Query(dbSizePerTenantQuery)
 	if sizeErr != nil {
-		glog.Error("failed to get db size for ", DBInstanceIdentifier)
+		glog.Error("failed to get db size for ", DBInstanceIdentifier, ".Error : ", sizeErr)
 
 	}
 	defer sizeResults.Close()
@@ -106,8 +111,7 @@ func getDbSizePerTenant(db *sql.DB, MetricsDataList *[]metricData, DBInstanceIde
 		dbSizeMetricData.DimensionValue = DBInstanceIdentifier
 		err := sizeResults.Scan(&dbSizeMetricData.MetricName, &dbSizeMetricData.MetricValue)
 		if err != nil {
-			glog.Fatal(err)
-			glog.Fatal("Failed scan for db size ", DBInstanceIdentifier)
+			glog.Error("Failed scan for db size ", DBInstanceIdentifier, ".Error: ", err)
 		}
 		*MetricsDataList = append(*MetricsDataList, dbSizeMetricData)
 	}
@@ -124,14 +128,12 @@ func getNewPutMetricDataInputPointer() *cloudwatch.PutMetricDataInput {
 func readRdsMetrics(rds, DBInstanceIdentifier string, TickAt time.Duration) {
 	db, err := sql.Open("mysql", rds)
 	if err != nil {
-		glog.Error("could not create sql driver ", rds)
-		db.Close()
+		glog.Error("could not create sql driver ", rds, ".Error: ", err)
 		return
 	}
 	pingErr := db.Ping()
 	if pingErr != nil {
 		glog.Error("could not connect to ", rds, " Error : ", pingErr)
-		db.Close()
 		return
 	}
 	ticker := time.NewTicker(TickAt * time.Second)
@@ -139,22 +141,21 @@ func readRdsMetrics(rds, DBInstanceIdentifier string, TickAt time.Duration) {
 		for t := range ticker.C {
 			fmt.Println("Tick at", t)
 			var MetricsDataList []metricData
-			var maxMetricsToInsert int
+
 			getConnectionPerTenant(db, &MetricsDataList, DBInstanceIdentifier)
 			getDbSizePerTenant(db, &MetricsDataList, DBInstanceIdentifier)
 			var pointerToNewMetricInput = getNewPutMetricDataInputPointer()
+			fmt.Println(len(MetricsDataList))
 
+			var maxMetricsToInsert int
+			lengthOfMetricsDataList := len(MetricsDataList)
 			if len(MetricsDataList) < maxMetricDataSize {
-				maxMetricsToInsert = len(MetricsDataList)
+				maxMetricsToInsert = lengthOfMetricsDataList
 			} else {
 				maxMetricsToInsert = maxMetricDataSize
 			}
-
-			//fmt.Println((*pointerToNewMetricInput).MetricData)
-			//fmt.Println(maxMetricsToInsert)
-
 			count := 0
-			for _, data := range MetricsDataList {
+			for index, data := range MetricsDataList {
 				(*pointerToNewMetricInput).MetricData = append((*pointerToNewMetricInput).MetricData, &cloudwatch.MetricDatum{
 					MetricName: aws.String(data.MetricName),
 					Unit:       aws.String(data.MetricUnit),
@@ -167,7 +168,12 @@ func readRdsMetrics(rds, DBInstanceIdentifier string, TickAt time.Duration) {
 					},
 				})
 				count++
-				if count == maxMetricsToInsert {
+
+				// if array is finished then putmetrics without creating new variables
+				// else if putmetrics and create new vars for each maxMetricsToInsert
+				if index == (lengthOfMetricsDataList - 1) {
+					cloudWatchChannel <- *pointerToNewMetricInput
+				} else if count == maxMetricsToInsert {
 					cloudWatchChannel <- *pointerToNewMetricInput
 					count = 0
 					pointerToNewMetricInput = getNewPutMetricDataInputPointer()
@@ -176,12 +182,10 @@ func readRdsMetrics(rds, DBInstanceIdentifier string, TickAt time.Duration) {
 		}
 		defer db.Close()
 	}()
-
 }
 
 func main() {
 	cloudWatchChannel = make(chan cloudwatch.PutMetricDataInput, 150)
-	maxMetricDataSize = 15
 	rdsToAwsService := make(map[string]*cloudwatch.CloudWatch)
 	readConfig()
 	for _, rds := range Config {
@@ -213,9 +217,10 @@ func main() {
 	}
 
 	for i := range cloudWatchChannel {
+		fmt.Println(len(i.MetricData))
 		_, err := rdsToAwsService[(*(i.MetricData[0].Dimensions[0].Value))].PutMetricData(&i)
 		if err != nil {
-			glog.Error(err.Error())
+			glog.Error("Failed to put cloudwatch metrics. Error: ", err.Error())
 		}
 	}
 }
