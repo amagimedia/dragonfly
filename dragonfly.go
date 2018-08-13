@@ -124,7 +124,7 @@ func getNewPutMetricDataInputPointer() *cloudwatch.PutMetricDataInput {
 func readRdsMetrics(rds, DBInstanceIdentifier string, TickAt time.Duration) {
 	db, err := sql.Open("mysql", rds)
 	if err != nil {
-		glog.Error("could not cmmreate sql driver ", rds)
+		glog.Error("could not create sql driver ", rds)
 		db.Close()
 		return
 	}
@@ -207,6 +207,7 @@ func main() {
 		sess := cloudwatch.New(session.Must(session.NewSessionWithOptions(session.Options{
 			SharedConfigState: session.SharedConfigEnable,
 			Config:            aws.Config{Region: aws.String(rds.AwsRegion)},
+			Profile:           rds.AwsProfile,
 		})))
 		rdsToAwsService[rds.DBInstanceIdentifier] = sess
 	}
