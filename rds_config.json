@@ -1,0 +1,9 @@
+[{
+    "user": "root",
+    "endpoint": "127.0.0.1",
+    "password": "root",
+    "db_instance_identifier": "localhost",
+    "aws_profile": "default",
+    "aws_region": "us-east-1",
+    "tick_seconds": 300
+}]
