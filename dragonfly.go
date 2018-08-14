@@ -53,7 +53,7 @@ type metricData struct {
 }
 
 func readConfig() {
-	inputConfig := flag.String("input", "rds_config.json", "list of clouds file")
+	inputConfig := flag.String("input", "dragonfly.json", "details of all database instances")
 	flag.Parse()
 	_, statErr := os.Stat(*inputConfig)
 
@@ -139,7 +139,7 @@ func readRdsMetrics(rds, DBInstanceIdentifier string, TickAt time.Duration) {
 	ticker := time.NewTicker(TickAt * time.Second)
 	go func() {
 		for t := range ticker.C {
-			fmt.Println("Tick at", t)
+			glog.Info("Tick at ", t, " for ", DBInstanceIdentifier)
 			var MetricsDataList []metricData
 			getConnectionPerTenant(db, &MetricsDataList, DBInstanceIdentifier)
 			getDbSizePerTenant(db, &MetricsDataList, DBInstanceIdentifier)
