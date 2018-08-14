@@ -141,20 +141,11 @@ func readRdsMetrics(rds, DBInstanceIdentifier string, TickAt time.Duration) {
 		for t := range ticker.C {
 			fmt.Println("Tick at", t)
 			var MetricsDataList []metricData
-
 			getConnectionPerTenant(db, &MetricsDataList, DBInstanceIdentifier)
 			getDbSizePerTenant(db, &MetricsDataList, DBInstanceIdentifier)
 			var pointerToNewMetricInput = getNewPutMetricDataInputPointer()
-			fmt.Println(len(MetricsDataList))
-
-			var maxMetricsToInsert int
-			lengthOfMetricsDataList := len(MetricsDataList)
-			if len(MetricsDataList) < maxMetricDataSize {
-				maxMetricsToInsert = lengthOfMetricsDataList
-			} else {
-				maxMetricsToInsert = maxMetricDataSize
-			}
-			count := 0
+			var lengthOfMetricsDataList = len(MetricsDataList)
+			var count = 0
 			for index, data := range MetricsDataList {
 				(*pointerToNewMetricInput).MetricData = append((*pointerToNewMetricInput).MetricData, &cloudwatch.MetricDatum{
 					MetricName: aws.String(data.MetricName),
@@ -168,12 +159,11 @@ func readRdsMetrics(rds, DBInstanceIdentifier string, TickAt time.Duration) {
 					},
 				})
 				count++
-
 				// if array is finished then putmetrics without creating new variables
-				// else if putmetrics and create new vars for each maxMetricsToInsert
+				// else if putmetrics and create new vars for each maxMetricDataSize
 				if index == (lengthOfMetricsDataList - 1) {
 					cloudWatchChannel <- *pointerToNewMetricInput
-				} else if count == maxMetricsToInsert {
+				} else if count == maxMetricDataSize {
 					cloudWatchChannel <- *pointerToNewMetricInput
 					count = 0
 					pointerToNewMetricInput = getNewPutMetricDataInputPointer()
@@ -185,6 +175,7 @@ func readRdsMetrics(rds, DBInstanceIdentifier string, TickAt time.Duration) {
 }
 
 func main() {
+	//defer profile.Start().Stop()
 	cloudWatchChannel = make(chan cloudwatch.PutMetricDataInput, 150)
 	rdsToAwsService := make(map[string]*cloudwatch.CloudWatch)
 	readConfig()
@@ -217,7 +208,6 @@ func main() {
 	}
 
 	for i := range cloudWatchChannel {
-		fmt.Println(len(i.MetricData))
 		_, err := rdsToAwsService[(*(i.MetricData[0].Dimensions[0].Value))].PutMetricData(&i)
 		if err != nil {
 			glog.Error("Failed to put cloudwatch metrics. Error: ", err.Error())
